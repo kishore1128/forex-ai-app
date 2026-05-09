@@ -1,4 +1,6 @@
+streamlit
 pandas
-requests
-ta-lib
+numpy
+yfinance
+openai
 python-dotenv
