@@ -6,71 +6,170 @@ import yfinance as yf
 
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 
-def _get_api_key():
-    return os.getenv("ALPHA_VANTAGE_API_KEY")
+# ---------------------------------------------------
+# API KEY
 
-def _use_yfinance(symbol: str):
+def _get_api_key():
+
+    return os.getenv(
+        "ALPHA_VANTAGE_API_KEY"
+    )
+
+# ---------------------------------------------------
+# FOREX CHECK
+
+def _use_yfinance(symbol):
+
     return len(symbol) == 6
 
-def fetch_ohlc(symbol: str, interval: str = "60min", outputsize: str = "compact"):
+# ---------------------------------------------------
+# FETCH OHLC
 
-    # ---------- FOREX via yfinance ----------
+def fetch_ohlc(
+    symbol,
+    interval="5m",
+    outputsize="compact"
+):
+
+    # ---------------------------------------------------
+    # FOREX DATA VIA YFINANCE
+
     if _use_yfinance(symbol):
 
-        ticker = f"{symbol.upper()}=X"
+        try:
 
-        yf_interval = interval.replace("min", "m")
+            ticker = (
+                f"{symbol.upper()}=X"
+            )
 
-        data = yf.download(
-            tickers=ticker,
-            period="7d",
-            interval=yf_interval,
-            progress=False,
-            auto_adjust=False
-        )
+            interval_map = {
+                "1min": "1m",
+                "5min": "5m",
+                "15min": "15m",
+                "30min": "30m",
+                "60min": "60m"
+            }
 
-        if data.empty:
-            raise RuntimeError(f"No data returned for {ticker}")
+            yf_interval = interval_map.get(
+                interval,
+                "5m"
+            )
 
-        # Remove multi-index columns if present
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+            data = yf.download(
+                ticker,
+                period="7d",
+                interval=yf_interval,
+                progress=False,
+                auto_adjust=False
+            )
 
-        df = data.reset_index()
+            if data.empty:
 
-        # Rename columns
-        rename_map = {
-            "Datetime": "timestamp",
-            "Date": "timestamp",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume"
-        }
+                # fallback retry
 
-        df.rename(columns=rename_map, inplace=True)
+                data = yf.download(
+                    ticker,
+                    period="1mo",
+                    interval="1h",
+                    progress=False,
+                    auto_adjust=False
+                )
 
-        # Select needed columns
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            if data.empty:
 
-        # Convert to numeric
-        numeric_cols = ["open", "high", "low", "close", "volume"]
+                raise RuntimeError(
+                    f"No data returned for {ticker}"
+                )
 
-        for col in numeric_cols:
-            df[col] = df[col].astype(float)
+            # Fix multi index issue
 
-        df.dropna(inplace=True)
+            if isinstance(
+                data.columns,
+                pd.MultiIndex
+            ):
 
-        df.reset_index(drop=True, inplace=True)
+                data.columns = (
+                    data.columns
+                    .get_level_values(0)
+                )
 
-        return df
+            df = data.reset_index()
 
-    # ---------- STOCKS via Alpha Vantage ----------
+            rename_map = {
+                "Datetime": "timestamp",
+                "Date": "timestamp",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume"
+            }
+
+            df.rename(
+                columns=rename_map,
+                inplace=True
+            )
+
+            required_cols = [
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
+
+            for col in required_cols:
+
+                if col not in df.columns:
+
+                    raise RuntimeError(
+                        f"Missing column: {col}"
+                    )
+
+            if "volume" not in df.columns:
+
+                df["volume"] = 0
+
+            numeric_cols = [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
+            ]
+
+            for col in numeric_cols:
+
+                df[col] = pd.to_numeric(
+                    df[col],
+                    errors="coerce"
+                )
+
+            df.dropna(inplace=True)
+
+            df.reset_index(
+                drop=True,
+                inplace=True
+            )
+
+            return df
+
+        except Exception as e:
+
+            raise RuntimeError(
+                f"Forex fetch failed: {e}"
+            )
+
+    # ---------------------------------------------------
+    # STOCK DATA VIA ALPHA VANTAGE
+
     api_key = _get_api_key()
 
     if not api_key:
-        raise RuntimeError("Alpha Vantage API key not set.")
+
+        raise RuntimeError(
+            "Alpha Vantage API key not set."
+        )
 
     params = {
         "function": "TIME_SERIES_DAILY",
@@ -80,9 +179,16 @@ def fetch_ohlc(symbol: str, interval: str = "60min", outputsize: str = "compact"
         "datatype": "json",
     }
 
-    url = f"{ALPHA_VANTAGE_URL}?{urlencode(params)}"
+    url = (
+        f"{ALPHA_VANTAGE_URL}?"
+        f"{urlencode(params)}"
+    )
 
-    resp = requests.get(url, timeout=30)
+    resp = requests.get(
+        url,
+        timeout=30
+    )
+
     resp.raise_for_status()
 
     data = resp.json()
@@ -90,23 +196,39 @@ def fetch_ohlc(symbol: str, interval: str = "60min", outputsize: str = "compact"
     key = "Time Series (Daily)"
 
     if key not in data:
-        raise RuntimeError(f"Unexpected response format: {data}")
+
+        raise RuntimeError(
+            f"Unexpected response: {data}"
+        )
 
     rows = []
 
     for ts, vals in data[key].items():
+
         rows.append({
             "timestamp": pd.to_datetime(ts),
             "open": float(vals["1. open"]),
             "high": float(vals["2. high"]),
             "low": float(vals["3. low"]),
             "close": float(vals["4. close"]),
-            "volume": float(vals.get("5. volume", 0.0)),
+            "volume": float(
+                vals.get(
+                    "5. volume",
+                    0.0
+                )
+            ),
         })
 
     df = pd.DataFrame(rows)
 
-    df.sort_values("timestamp", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    df.sort_values(
+        "timestamp",
+        inplace=True
+    )
+
+    df.reset_index(
+        drop=True,
+        inplace=True
+    )
 
     return df
